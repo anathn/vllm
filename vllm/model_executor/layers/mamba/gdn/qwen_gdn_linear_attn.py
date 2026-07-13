@@ -3,6 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import functools
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Literal
 
 import torch
@@ -287,6 +288,44 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def _resolve_unquantized_gemm_blas_backend(tp_size: int) -> str | None:
+    """Resolve the BLAS backend override for the GDN in_proj/out_proj GEMMs.
+
+    These projections stay unquantized (BF16) even under FP8/NVFP4
+    checkpoints, since quantization configs exempt ``linear_attn`` modules.
+    On integrated/UMA Blackwell-family GPUs (e.g. DGX Spark, GH200) with
+    tensor-parallel-size > 1, the default cuBLASLt GEMM heuristic for these
+    shapes has been reported to hang the launching thread; forcing the
+    legacy cuBLAS backend works around it. See
+    https://github.com/vllm-project/vllm/issues/37602
+
+    Returns None when no override is needed (the common case), else
+    "cublas" or "cublaslt" to pass to
+    ``torch.backends.cuda.preferred_blas_library``.
+    """
+    backend = envs.VLLM_GDN_UNQUANTIZED_GEMM_BACKEND
+    if backend != "auto":
+        return backend
+    if (
+        current_platform.is_cuda()
+        and tp_size > 1
+        and current_platform.is_integrated_gpu()
+        and current_platform.is_device_capability_family(100)
+    ):
+        return "cublas"
+    return None
+
+
+@contextmanager
+def _blas_library_override(backend: str):
+    previous = torch.backends.cuda.preferred_blas_library()
+    torch.backends.cuda.preferred_blas_library(backend=backend)
+    try:
+        yield
+    finally:
+        torch.backends.cuda.preferred_blas_library(backend=previous)
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -558,6 +597,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+        )
+        self._unquantized_gemm_blas_backend = _resolve_unquantized_gemm_blas_backend(
+            self.tp_size
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -865,8 +907,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output, _ = self.out_proj(core_attn_out)
+        with self._gemm_backend_ctx():
+            output, _ = self.out_proj(core_attn_out)
         return output
+
+    def _gemm_backend_ctx(self) -> AbstractContextManager[None]:
+        """Context manager applying the BLAS backend override (if any)
+        around this layer's unquantized in_proj/out_proj GEMMs. See
+        :func:`_resolve_unquantized_gemm_blas_backend`."""
+        if self._unquantized_gemm_blas_backend is None:
+            return nullcontext()
+        return _blas_library_override(self._unquantized_gemm_blas_backend)
 
     def forward_hip(
         self,
@@ -918,8 +969,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        with self._gemm_backend_ctx():
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout

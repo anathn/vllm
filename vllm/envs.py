@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_GDN_UNQUANTIZED_GEMM_BACKEND: Literal["auto", "cublas", "cublaslt"] = "auto"
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -586,6 +587,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # BLAS backend for the unquantized (BF16) GDN linear-attention GEMMs
+    # (Qwen3.5/Qwen3-Next in_proj/out_proj), which stay unquantized even
+    # under FP8/NVFP4 checkpoints. "auto" forces the legacy cuBLAS backend
+    # (bypassing cuBLASLt) on integrated/UMA Blackwell-family GPUs
+    # (e.g. DGX Spark, GH200) when tensor-parallel-size > 1, working around
+    # a reported hang in the cuBLASLt GEMM heuristic on that hardware combo:
+    # https://github.com/vllm-project/vllm/issues/37602
+    # Set explicitly to "cublas" or "cublaslt" to override the auto-detect.
+    "VLLM_GDN_UNQUANTIZED_GEMM_BACKEND": env_with_choices(
+        "VLLM_GDN_UNQUANTIZED_GEMM_BACKEND",
+        "auto",
+        ["auto", "cublas", "cublaslt"],
+        case_sensitive=False,
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
