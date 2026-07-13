@@ -1123,6 +1123,23 @@ ENTRYPOINT ["vllm", "serve"]
 #   * All cache/config envs (HF_HOME, VLLM_CACHE_ROOT, TRITON_CACHE_DIR, ...)
 #     remain unset so their library defaults resolve to $HOME/.cache/... ,
 #     which is writable.
+#################### OPENAI API SERVER (WITH NCCL 2.29.7+ FIX FOR AARCH64) ####################
+# This target pins NCCL 2.29.7+ to fix the spurious CAS failure in
+# ncclProxyGetPostedOps on aarch64 that causes silent deadlock after hours.
+# See: https://github.com/vllm-project/vllm/issues/37602
+FROM vllm-openai-base AS vllm-openai-nccl-fix
+
+ARG NCCL_VERSION=2.29.7
+
+# Install NCCL 2.29.7+ to fix aarch64 slot-leak deadlock bug
+# https://github.com/NVIDIA/nccl/pull/1280 (fixed between v2.29.2 and v2.29.7)
+RUN python /opt/venv/bin/python3 -m pip install --no-cache-dir \
+    nvidia-nccl-cu13==${NCCL_VERSION} && \
+    python /opt/venv/bin/python3 -c "import torch; import torch.distributed as dist; print('NCCL fix applied: CUDA available =', torch.cuda.is_available())"
+
+ENTRYPOINT ["vllm", "serve"]
+#################### OPENAI API SERVER (WITH NCCL 2.29.7+ FIX FOR AARCH64) ####################
+
 FROM vllm-openai AS vllm-openai-nonroot
 
 USER vllm
