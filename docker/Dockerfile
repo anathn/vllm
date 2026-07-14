@@ -1133,9 +1133,9 @@ ARG NCCL_VERSION=2.29.7
 
 # Install NCCL 2.29.7+ to fix aarch64 slot-leak deadlock bug
 # https://github.com/NVIDIA/nccl/pull/1280 (fixed between v2.29.2 and v2.29.7)
-RUN python /opt/venv/bin/python3 -m pip install --no-cache-dir \
+RUN /opt/venv/bin/pip install --no-cache-dir \
     nvidia-nccl-cu13==${NCCL_VERSION} && \
-    python /opt/venv/bin/python3 -c "import torch; import torch.distributed as dist; print('NCCL fix applied: CUDA available =', torch.cuda.is_available())"
+    /opt/venv/bin/python3 -c "import torch; import torch.distributed as dist; print('NCCL fix applied: CUDA available =', torch.cuda.is_available())"
 
 ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER (WITH NCCL 2.29.7+ FIX FOR AARCH64) ####################
